@@ -13,7 +13,7 @@ The simulation outputs a velocity and density field which can both be used by ot
 The density field can be rendered using a heterogenous volume.
 Niagara PFX systems can easily read from the velocity field to advect particles, this is very cool!
 
-Future optimisations include using the methods outlined here:
-https://www.youtube.com/watch?v=i07q2LcvI3c
-https://www.youtube.com/watch?v=_3eyPUyqluc
+Future optimisations include using the methods outlined here:  
+https://www.youtube.com/watch?v=i07q2LcvI3c  
+https://www.youtube.com/watch?v=_3eyPUyqluc  
 
