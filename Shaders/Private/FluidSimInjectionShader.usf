@@ -1,0 +1,166 @@
+#include "/Engine/Public/Platform.ush"
+
+
+// Note usage of "0...1" range in comments does not descibe values within a 0...1 range, but values analogous to a UV 0...1 range 
+// as we are using indexed values in the range of 0...TextureSize, which could/does have unequal texture sizes. This requires further thought.
+
+// Fluid source types in shader, this must match the cpp Enum EFluidInjectionType
+#define NOSOURCE 0
+#define VELOCITY 1
+#define PRESSURE 2
+#define FANPRESSURE 4
+#define DENSITY 8
+
+#define KINDASMALLNUMBER (1.e-3f)
+#define KINDASMALLVECTOR float3(KINDASMALLNUMBER, KINDASMALLNUMBER, KINDASMALLNUMBER)
+
+struct FInjectionEvent
+{
+	uint InjectionType; // Based on EFluidInjectionType: 0 Vel, 1 Pressure, 2 Density.
+	int3 ForcePosition; 
+	float3 ForceDirection;
+	float Strength;
+	float Size;
+	float Hardness;
+};
+
+RWTexture3D<float4> RT_Velocity;
+RWTexture3D<float4> RT_Pressure;
+RWTexture3D<float4> RT_Density;
+
+uint3 FieldResolution;
+
+StructuredBuffer<FInjectionEvent> InjectionEventBuffer; 
+int BufferLength; // Should not be needed but InjectionEventBuffer seems to create bigger than is defined 
+
+float3 AlphaBlend(float3 X, float3 Y, float S)
+{
+	return lerp(X.rgb, Y.rgb, saturate(float3(S, S, S)));
+}
+
+float SplatFanPressure(float3 DispatchThreadVec, FInjectionEvent Event)
+{
+	float3 Location = DispatchThreadVec - float3(Event.ForcePosition);
+	
+	//float3 MaskLocation = Location * float3(2.0f, 1.0f, 1.0f); // Scale the shape to not be radial, will require expensive rotation... :(
+	float Magnitude = length(Location);
+	Magnitude /= Event.Size;
+	Magnitude = saturate(Magnitude);
+	float SplatMask = 1 - Magnitude;
+
+	// Get compute to UV space, use as mask.
+	float3 TexSize = float3(FieldResolution); 
+	float3 FieldUV = (DispatchThreadVec / TexSize);
+	FieldUV -= Event.ForcePosition / TexSize;
+
+	float3 PressureDir = FieldUV * Event.ForceDirection; // Mask to direction.
+	float3 InvPressureDir = FieldUV * (-1.0f * Event.ForceDirection);
+
+	float Gradient = (PressureDir.r + PressureDir.g + PressureDir.b) / 3.0;
+	float InvGradient = (InvPressureDir.r + InvPressureDir.g + InvPressureDir.b) / 3.0;
+
+	Gradient = Gradient - InvGradient;
+	Gradient *= max(max(FieldResolution.x, FieldResolution.y), FieldResolution.z); // Max of texture size. To get back to a 0..1 range.
+	Gradient *= SplatMask;
+	Gradient *= Event.Strength;
+	
+	return Gradient;
+}
+
+
+float4 SplatVelocity(float3 DispatchThreadVec, FInjectionEvent Event )
+{
+	float3 Location = DispatchThreadVec - float3(Event.ForcePosition);
+	
+	// Create radial falloff/ramp mask.
+	float Magnitude = length(Location);
+	Magnitude /= Event.Size;
+	Magnitude = saturate(Magnitude);
+	float SplatMask = 1 - Magnitude;
+
+	// Radial Velocity.
+	float3 SplatVel = DispatchThreadVec - float3(Event.ForcePosition);
+	SplatVel += KINDASMALLVECTOR; // Fix for NaN when DispatchThreadVec is 0, 0, 0;
+	SplatVel = normalize(SplatVel); // Scale velocity vec back to "0...1" range of magnitude, (really 0...TexSize). .
+	SplatVel *= Event.Strength;
+
+	// Directional Velocity.
+	float3 Vel = Event.ForceDirection; 
+	Vel *= Event.Strength * Event.Strength;  
+
+	// Bias radial towards the direction.
+	SplatVel = (Vel + SplatVel) / 2.0f; 
+	// Blend radial and directional where centre is directional and edge is radial. 
+	Vel = lerp(SplatVel, Vel, SplatMask);
+	
+	Vel *= SplatMask;
+	return float4(Vel, SplatMask);
+}
+
+
+float SplatSpherical(float3 DispatchThreadVec, FInjectionEvent Event )
+{
+	float3 Location = DispatchThreadVec - float3(Event.ForcePosition);
+	float Distance = length(Location);
+	float Splat = 1 - Distance;
+	Splat -= 1 - Event.Size;
+	Splat /= Event.Size;
+	Splat /= 1.0f - Event.Hardness;
+	Splat = saturate(Splat);
+	Splat *= Event.Strength;
+	
+	return Splat;
+}
+
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void InjectionShader(
+	uint3 DispatchThreadId : SV_DispatchThreadID,
+	uint GroupIndex : SV_GroupIndex )
+{
+	float4 OutVelocity = RT_Velocity[DispatchThreadId.xyz];
+	float4 OutPressure = RT_Pressure[DispatchThreadId.xyz];
+	float4 OutDensity = RT_Density[DispatchThreadId.xyz];
+	
+	float3 DispatchThreadVec = float3(DispatchThreadId);
+	
+	for (uint i = 0; i < BufferLength; i++)
+	{
+		if (InjectionEventBuffer[i].InjectionType == NOSOURCE)
+		{
+			continue;
+		}
+		
+		if (InjectionEventBuffer[i].InjectionType == VELOCITY)
+		{
+			float4 NewVel = SplatVelocity(DispatchThreadVec, InjectionEventBuffer[i]);
+			OutVelocity += float4(NewVel.rgb, 1.0);
+		}
+		
+		if (InjectionEventBuffer[i].InjectionType == PRESSURE)
+		{
+			float Splat = SplatSpherical(DispatchThreadVec, InjectionEventBuffer[i] );
+			float3 OutSplat = AlphaBlend(OutPressure.rgb, float3(Splat, Splat, Splat), Splat);
+			OutPressure = float4(OutSplat, 1.0);
+		};
+		
+		if (InjectionEventBuffer[i].InjectionType == FANPRESSURE)
+		{
+			float Splat = SplatFanPressure(DispatchThreadVec, InjectionEventBuffer[i]);
+			float3 OutSplat = AlphaBlend(OutPressure.rgb, Splat, abs(Splat));
+			OutPressure = float4(OutSplat, 1.0);
+		}
+		
+		if (InjectionEventBuffer[i].InjectionType == DENSITY)
+		{
+			float Splat = SplatSpherical(DispatchThreadVec, InjectionEventBuffer[i]);
+			OutDensity = float4(AlphaBlend(OutDensity.rgb, float3(Splat, Splat, Splat), Splat), 1.0);
+		}
+	}
+	
+	// Write final values.
+	RT_Velocity[DispatchThreadId.xyz] = OutVelocity;
+	RT_Pressure[DispatchThreadId.xyz] = OutPressure; 
+	RT_Density[DispatchThreadId.xyz] = OutDensity;
+}
+

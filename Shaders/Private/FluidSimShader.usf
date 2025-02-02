@@ -1,0 +1,140 @@
+#include "/Engine/Public/Platform.ush"
+
+RWTexture3D<float4> RT_Field_Write;
+RWTexture3D<float4> RT_Vel_Write;
+Texture3D<float4> RT_Velocity; 				
+Texture3D<float4> RT_Field_Read; 				
+SamplerState SamplerTrilinear;
+uint3 FieldSize;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void AdvectionShader(
+	uint3 DispatchThreadId : SV_DispatchThreadID,
+	uint GroupIndex : SV_GroupIndex )
+{
+	//float3 TexelSize = float3(1.0f, 1.0f, 1.0f) / float3(FieldSize.x, FieldSize.y, FieldSize.z);
+	
+	float4 Vel = RT_Velocity[DispatchThreadId.xyz];
+	//float3 UV = float3(DispatchThreadId.xyz) / float3(FieldSize - int3(1, 1, 1));
+	//UV = UV - Vel.xyz;
+	//float4 FieldVal = RT_Field_Read.Sample(SamplerTrilinear, UV);
+	//RT_Field_Write[DispatchThreadId.xyz] = FieldVal; // Trilinear offsets the sampling towards the middle of the texture?
+
+	RT_Field_Write[DispatchThreadId.xyz] = RT_Field_Write[DispatchThreadId.xyz - int3(Vel.xyz)];
+	RT_Vel_Write[DispatchThreadId.xyz] = RT_Velocity[DispatchThreadId - int3(Vel.xyz)];
+}
+
+RWTexture3D<float4> RT_DissipationField;
+float DissipationGain;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void DissipationShader(
+	uint3 DispatchThreadId : SV_DispatchThreadID,
+	uint GroupIndex : SV_GroupIndex)
+{
+	float4 Value = RT_DissipationField[DispatchThreadId.xyz];
+	
+	float Gain = 1-saturate(DissipationGain);
+	RT_DissipationField[DispatchThreadId.xyz] = Value * Gain;
+}
+
+RWTexture3D<float4> RT_DiffusionField;
+float DiffusionGain;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void DiffusionShader(
+	uint3 DispatchThreadId : SV_DispatchThreadID,
+	uint GroupIndex : SV_GroupIndex)
+{
+	float VoxelVal = RT_DiffusionField[DispatchThreadId.xyz].r;
+	
+	float VoxForward = RT_DiffusionField[DispatchThreadId.xyz + int3(1, 0, 0)].r;
+	float VoxBack = RT_DiffusionField[DispatchThreadId.xyz + int3(-1, 0, 0)].r;
+	float VoxRight = RT_DiffusionField[DispatchThreadId.xyz + int3(0, 1, 0)].r;
+	float VoxLeft = RT_DiffusionField[DispatchThreadId.xyz + int3(0, -1, 0)].r;
+	float VoxUp = RT_DiffusionField[DispatchThreadId.xyz + int3(0, 0, 1)].r;
+	float VoxDown = RT_DiffusionField[DispatchThreadId.xyz + int3(0, 0, -1)].r;
+	
+	float SurroundingVoxels = VoxForward + VoxBack + VoxRight + VoxLeft + VoxUp + VoxDown; // s2
+	float CombinedVoxel = DiffusionGain * SurroundingVoxels + VoxelVal; // * DeltaTime add when implementing.  // s1
+	float OutVal = CombinedVoxel / ((1 + 6) * DiffusionGain); //* DeltaTime; 1 + numPixels ....
+    
+    RT_DiffusionField[DispatchThreadId.xyz] = float4(OutVal, OutVal, OutVal, 1.0f);
+}
+
+Texture3D<float4> RT_Divergence_Vel;	
+RWTexture3D<float4> RT_Divergence;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void DivergenceShader(
+	uint3 DispatchThreadId : SV_DispatchThreadID,
+	uint GroupIndex : SV_GroupIndex)
+{
+	float Divisor = 2.0f;
+	
+	float VoxForward = RT_Divergence_Vel[DispatchThreadId.xyz + int3(1, 0, 0)].x;
+	float VoxBack = RT_Divergence_Vel[DispatchThreadId.xyz + int3(-1, 0, 0)].x;
+	float X = (VoxForward - VoxBack) / Divisor;
+	
+	float VoxRight = RT_Divergence_Vel[DispatchThreadId.xyz + int3(0, 1, 0)].y;
+	float VoxLeft = RT_Divergence_Vel[DispatchThreadId.xyz + int3(0, -1, 0)].y;
+	float Y = (VoxRight - VoxLeft) / Divisor;
+	
+	float VoxUp = RT_Divergence_Vel[DispatchThreadId.xyz + int3(0, 0, 1)].z;
+	float VoxDown = RT_Divergence_Vel[DispatchThreadId.xyz + int3(0, 0, -1)].z;
+	float Z = (VoxUp - VoxDown) / Divisor;
+
+	float Out = (X + Y + Z);
+	RT_Divergence[DispatchThreadId.xyz] = float4(Out, Out, Out, 1.0f);	
+}
+
+Texture3D<float4> RT_ProjPressure_Divergence;
+RWTexture3D<float4> RT_ProjPressure_Pressure;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void ProjPressureShader(
+	uint3 DispatchThreadId : SV_DispatchThreadID,
+	uint GroupIndex : SV_GroupIndex)
+{
+	float VoxF = RT_ProjPressure_Pressure[DispatchThreadId.xyz + int3(1, 0, 0)].x;
+	float VoxB = RT_ProjPressure_Pressure[DispatchThreadId.xyz + int3(-1, 0, 0)].x;
+	float VoxR = RT_ProjPressure_Pressure[DispatchThreadId.xyz + int3(0, 1, 0)].x;
+	float VoxL = RT_ProjPressure_Pressure[DispatchThreadId.xyz + int3(0, -1, 0)].x;
+	float VoxU = RT_ProjPressure_Pressure[DispatchThreadId.xyz + int3(0, 0, 1)].x;
+	float VoxD = RT_ProjPressure_Pressure[DispatchThreadId.xyz + int3(0, 0, -1)].x;
+	
+	float SurroundingVoxels = VoxF + VoxB + VoxL + VoxR + VoxU + VoxD; 
+	float Divergence = RT_ProjPressure_Divergence[DispatchThreadId.xyz].x; 
+	float Out = (SurroundingVoxels + -1.0f * Divergence) * (1.0f/6.0f);
+	
+	RT_ProjPressure_Pressure[DispatchThreadId.xyz] = float4(Out, Out, Out, 1.0f);
+}
+
+Texture3D<float4> RT_ProjGradient_Pressure;	
+RWTexture3D<float4> RT_ProjGradient_Velocity;
+
+[numthreads(THREADS_X, THREADS_Y, THREADS_Z)]
+void ProjGradientVelShader(
+	uint3 DispatchThreadId : SV_DispatchThreadID,
+	uint GroupIndex : SV_GroupIndex)
+{
+	float Divisor = 2.0f; 
+	
+	// Calculate pressure gradient
+	float VoxF = RT_ProjGradient_Pressure[DispatchThreadId.xyz + int3(1, 0, 0)].x;
+	float VoxB = RT_ProjGradient_Pressure[DispatchThreadId.xyz + int3(-1, 0, 0)].x;
+	float X = (VoxF - VoxB) / Divisor;
+	
+	float VoxR = RT_ProjGradient_Pressure[DispatchThreadId.xyz + int3(0, 1, 0)].x;
+	float VoxL = RT_ProjGradient_Pressure[DispatchThreadId.xyz + int3(0, -1, 0)].x;
+	float Y = (VoxR - VoxL) / Divisor;
+	
+	float VoxU = RT_ProjGradient_Pressure[DispatchThreadId.xyz + int3(0, 0, 1)].x;
+	float VoxD = RT_ProjGradient_Pressure[DispatchThreadId.xyz + int3(0, 0, -1)].x;
+	float Z = (VoxU - VoxD) / Divisor;
+
+	float3 Gradient = float3(X, Y, Z);
+	float3 NonDivergentVelocity = RT_ProjGradient_Velocity[DispatchThreadId.xyz].xyz - Gradient;
+	
+	RT_ProjGradient_Velocity[DispatchThreadId.xyz] = float4(NonDivergentVelocity, 1.0f);
+}
