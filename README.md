@@ -2,7 +2,7 @@ A compute shader implementation of a jacobi iteration based fluid simulation as 
 
 This is based on the same principles in [GPU Gems, Chapter 38](https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-38-fast-fluid-dynamics-simulation-gpu) and uses many other implementations as reference for the other specifics.
 
-This simulation is in 3D space using a default grid size of 64x64x32 voxels, though this is user configurable, and takes approximates 500 micro seconds on a 3060 laptop GPU. Note that this is also using multiple superfluous texture readbacks, so there are optisations to make.
+This simulation is in 3D space using a default grid size of 64x64x32 voxels, though this is user configurable, and takes approximates 500 micro seconds on a 3060 laptop GPU. Note that this is also using multiple superfluous texture readbacks, so there are optimisations to make.
 
 There are multiple sourcing types:  
 **Fan** - Velocity in a direction.  
